@@ -21,6 +21,15 @@ from sqlalchemy.orm import joinedload
 # ==================================================
 
 app = FastAPI(title="AI-Based Automatic FAQ Generation")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://faq-generator-ten.vercel.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Create database tables if they do not already exist.
 Base.metadata.create_all(bind=engine)
