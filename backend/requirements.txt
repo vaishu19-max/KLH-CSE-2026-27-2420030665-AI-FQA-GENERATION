@@ -4,9 +4,7 @@ uvicorn[standard]
 python-multipart
 pypdf
 python-docx
-transformers
-torch
-sentencepiece
-protobuf
 tiktoken
 SQLAlchemy
+google-genai
+groq

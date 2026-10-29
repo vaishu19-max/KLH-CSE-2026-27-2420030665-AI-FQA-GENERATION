@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = "https://faq-generator-backend-20ra.onrender.com";
 
 const processingStages = [
   "Document Upload",

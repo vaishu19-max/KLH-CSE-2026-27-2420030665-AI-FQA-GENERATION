@@ -4,12 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pypdf import PdfReader
 from docx import Document
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
 
 from io import BytesIO
 from difflib import SequenceMatcher
 import re
-import torch
+
 
 from database import SessionLocal, engine, Base
 import models
@@ -41,33 +41,6 @@ app.add_middleware(
 # 2. T5 MODEL CONFIGURATION
 # ==================================================
 
-MODEL_NAME = "valhalla/t5-base-qg-hl"
-
-tokenizer = None
-model = None
-
-
-def load_t5_model():
-    """Load T5 once and reuse it for future requests."""
-    global tokenizer, model
-
-    if tokenizer is None or model is None:
-        print("Loading T5 question-generation model...")
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_NAME,
-            use_fast=False
-        )
-
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            MODEL_NAME
-        )
-
-        model.eval()
-
-        print("T5 model loaded successfully.")
-
-    return tokenizer, model
 
 
 # ==================================================
@@ -246,94 +219,90 @@ def is_duplicate_question(question, existing_questions):
 # 6. T5 QUESTION GENERATION
 # ==================================================
 
+
+
 def generate_t5_faqs(text, max_faqs=8):
-    """
-    Generate questions with T5 using different source sentences.
+    """Generate document-grounded FAQs using Groq."""
 
-    Answers remain grounded in the uploaded document.
-    Similar questions are filtered out.
-    """
+    import os
+    import json
+    from groq import Groq
 
-    tokenizer, model = load_t5_model()
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured.")
 
-    sentences = split_into_sentences(text)
+    client = Groq(api_key=api_key)
 
-    if not sentences:
-        return []
+    document_text = text[:20000]
+
+    prompt = f"""
+Create up to {max_faqs} useful questions and answers based only
+on the document below.
+
+Return only a JSON array in this format:
+[
+  {{
+    "question": "A clear question?",
+    "answer": "An answer supported by the document.",
+    "category": "General"
+  }}
+]
+
+Do not invent facts or create duplicate questions.
+
+DOCUMENT:
+{document_text}
+"""
+
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[
+            {
+                "role": "system",
+                "content": "You generate accurate FAQs from documents."
+            },
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2,
+        response_format={"type": "json_object"}
+    )
+
+    try:
+        result = json.loads(response.choices[0].message.content)
+        if isinstance(result, dict):
+            generated = result.get("faqs", [])
+        else:
+            generated = result
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        raise RuntimeError("Groq returned an invalid FAQ response.")
+
+    if not isinstance(generated, list):
+        raise RuntimeError("Groq response did not contain a FAQ list.")
 
     faqs = []
     used_questions = []
-    used_answers = []
 
-    # Use a wider range of source sentences.
-    for index, answer in enumerate(sentences):
-
+    for item in generated:
         if len(faqs) >= max_faqs:
             break
 
-        # Avoid selecting the same answer twice.
-        normalized_answer = normalize_question(answer)
-
-        if normalized_answer in used_answers:
+        if not isinstance(item, dict):
             continue
 
-        # Keep context local to the candidate sentence.
-        start = max(0, index - 1)
-        end = min(len(sentences), index + 2)
+        question = str(item.get("question", "")).strip()
+        answer = str(item.get("answer", "")).strip()
+        category = str(item.get("category", "General")).strip()
 
-        context_sentences = sentences[start:end]
-        context = " ".join(context_sentences)
-
-        # Highlight the answer for T5.
-        prompt = (
-            f"generate question: {context} "
-            f"answer: <hl> {answer} <hl>"
-        )
-
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512
-        )
-
-        with torch.no_grad():
-            output = model.generate(
-                **inputs,
-                max_new_tokens=64,
-                num_beams=4,
-                no_repeat_ngram_size=3,
-                early_stopping=True
-            )
-
-        question = tokenizer.decode(
-            output[0],
-            skip_special_tokens=True
-        ).strip()
-
-        # Remove a possible model prefix.
-        question = re.sub(
-            r"^(question|generate question)\s*:\s*",
-            "",
-            question,
-            flags=re.IGNORECASE
-        ).strip()
-
-        if not question:
+        if not question or not answer:
             continue
 
-        # Basic output validation.
         if len(question.split()) < 4:
-            continue
-
-        # Reject questions that simply repeat the answer.
-        if normalize_question(question) == normalized_answer:
             continue
 
         if not question.endswith("?"):
             question += "?"
 
-        # Reject repetitive questions.
         if is_duplicate_question(question, used_questions):
             continue
 
@@ -341,13 +310,13 @@ def generate_t5_faqs(text, max_faqs=8):
             "id": len(faqs) + 1,
             "question": question,
             "answer": answer,
-            "category": "General"
+            "category": category or "General"
         })
-
         used_questions.append(question)
-        used_answers.append(normalized_answer)
 
     return faqs
+
+
 
 
 # ==================================================
